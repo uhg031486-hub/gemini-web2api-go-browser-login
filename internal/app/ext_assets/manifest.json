@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "Gemini — Đồng bộ phiên (Tiếng Việt)",
+  "version": "1.2.1",
+  "description": "Lưu nhiều tài khoản Gemini và đồng bộ phiên về máy chủ gemini-web2api tự duy trì.",
+  "minimum_chrome_version": "110",
+  "permissions": [
+    "cookies",
+    "storage",
+    "alarms",
+    "tabs",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://*.google.com/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*",
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Gemini — Đồng bộ phiên",
+    "default_popup": "popup.html"
+  }
+}

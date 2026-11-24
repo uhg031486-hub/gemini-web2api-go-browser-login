@@ -1,0 +1,208 @@
+package app
+
+import (
+	"crypto/sha1"
+	"encoding/hex"
+	"fmt"
+	"net/http"
+	"net/url"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	tls_client "github.com/bogdanfinn/tls-client"
+	"github.com/bogdanfinn/tls-client/profiles"
+)
+
+var (
+	clientCache   = map[string]tls_client.HttpClient{}
+	clientCacheMu sync.RWMutex
+)
+
+// resolveProfile maps a config string to a tls-client ClientProfile.
+// Defaults to Chrome_146 (matches Python v2's curl_cffi chrome146).
+func resolveProfile(name string) profiles.ClientProfile {
+	switch strings.ToLower(name) {
+	case "chrome_120":
+		return profiles.Chrome_120
+	case "chrome_124":
+		return profiles.Chrome_124
+	case "chrome_131":
+		return profiles.Chrome_131
+	case "chrome_133":
+		return profiles.Chrome_133
+	case "chrome_144":
+		return profiles.Chrome_144
+	case "chrome_146", "chrome146":
+		return profiles.Chrome_146
+	case "firefox_120":
+		return profiles.Firefox_120
+	case "firefox_123":
+		return profiles.Firefox_123
+	case "firefox_147", "firefox147":
+		return profiles.Firefox_147
+	case "safari_16_0":
+		return profiles.Safari_16_0
+	case "safari_ios_17_0":
+		return profiles.Safari_IOS_17_0
+	default:
+		return profiles.Chrome_146
+	}
+}
+
+// getTLSClient returns a tls-client (Chrome 146 fingerprint) for direct connections only.
+// For proxied connections we use stdlib (see getStdlibClient) — tls-client's SOCKS5
+// implementation is fragile compared to net/http.
+func getTLSClient() tls_client.HttpClient {
+	return getTLSClientTimeout(0)
+}
+
+// getTLSClientTimeout 同 getTLSClient，但可指定超时（秒）；0 = 用全局配置。
+// tls-client 没有运行时的超时 setter（超时在建实例时固化），所以按
+// (指纹, 超时) 组合缓存独立实例。媒体请求用 mediaTimeoutSec。
+func getTLSClientTimeout(timeoutSec int) tls_client.HttpClient {
+	if timeoutSec <= 0 {
+		timeoutSec = rtCfg().RequestTimeout
+	}
+	key := rtCfg().Impersonate + "|" + strconv.Itoa(timeoutSec)
+
+	clientCacheMu.RLock()
+	if c, ok := clientCache[key]; ok {
+		clientCacheMu.RUnlock()
+		return c
+	}
+	clientCacheMu.RUnlock()
+
+	clientCacheMu.Lock()
+	defer clientCacheMu.Unlock()
+	if c, ok := clientCache[key]; ok {
+		return c
+	}
+	opts := []tls_client.HttpClientOption{
+		tls_client.WithTimeoutSeconds(timeoutSec),
+		tls_client.WithClientProfile(resolveProfile(rtCfg().Impersonate)),
+		tls_client.WithNotFollowRedirects(),
+	}
+	client, err := tls_client.NewHttpClient(tls_client.NewNoopLogger(), opts...)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[client] tls-client init failed: %v\n", err)
+		os.Exit(1)
+	}
+	clientCache[key] = client
+	return client
+}
+
+// ─── Stdlib HTTP client for proxied requests ─────────────────────────────────
+//
+// 走代理时改用 stdlib 而不是 tls-client，因为：
+// 1. stdlib 的 http.ProxyURL 原生支持 socks5:// / socks5h:// / http:// / https://，
+//    已知能过我们手头的代理。
+// 2. tls-client 自带的 SOCKS 实现在某些代理端会 EOF（已实测）。
+//
+// 代价要写清楚：走代理时 Google 看到的是**我们自己的 TLS 指纹**，即 Go 标准库的，
+// 不是 Chrome 146 的。HTTP CONNECT 只建隧道，TLS 是我们跟目标端到端握的。
+// JA3 回显实测：stdlib 直连和过代理是同一个 JA3（03117a8e…），而同一个代理下换成
+// tls-client 就变成另一个（2d25c563…）——两条判据都说明代理不介入 TLS。
+//
+// 但这不构成换回 tls-client 的理由：同时起跑的对照里 tls-client Chrome_146 打到
+// 111 次被拦、Go stdlib 103 次，差 8 次；而同配置换个出口的方差能到 36%
+// （151 vs 111）。指纹差异真实存在，对封禁阈值没有可观测影响。
+//
+// 不走代理时仍然用 getTLSClient（保留 utls/chrome146 真指纹优势）。
+
+var (
+	stdlibClientCache sync.Map // proxyURL -> *http.Client
+)
+
+// mediaTimeoutSec 是媒体请求（生图/音乐/视频）的单独超时（秒）。
+//
+// 为什么单独给：视频（Veo）生成比普通对话慢得多。实测数据（2026-09-16/17）：
+//   - 180 秒超时：视频 StreamGenerate 撞墙（182.9s 被砍）
+//   - 300 秒超时：仍然不够（310.7s 被砍）
+//
+// 视频生成的 StreamGenerate 是**同步等待**上游把视频做完才回，队列繁忙时
+// 需要数分钟。全局 180 秒是为普通对话调的，媒体请求必须给足预算。
+//
+// 取 540 秒（9 分钟）：new-api 渠道测试实测能等约 9 分 8 秒（观测值），
+// 540 秒留出链路开销的余量，避免我们比客户端先放弃。
+// 超时后不重试（见 gemini.go：isTimeoutError 分支），总耗时 ≈ 单次超时；
+// 网络类错误（连接被重置）才重试一次，那是瞬时故障。
+const mediaTimeoutSec = 540
+
+// getStdlibClientTimeout 同 getStdlibClient，但可指定超时（秒）。
+// 超时不同则用独立缓存键，互不干扰。
+func getStdlibClientTimeout(proxyURL string, timeoutSec int) *http.Client {
+	if timeoutSec <= 0 {
+		timeoutSec = rtCfg().RequestTimeout
+	}
+	key := proxyURL + "|" + strconv.Itoa(timeoutSec)
+	if cached, ok := stdlibClientCache.Load(key); ok {
+		return cached.(*http.Client)
+	}
+	t := &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 20,
+		IdleConnTimeout:     90 * time.Second,
+		DisableCompression:  false,
+		// 走代理时不强求 HTTP/2，部分代理不支持。
+		ForceAttemptHTTP2: false,
+	}
+	if u, err := url.Parse(proxyURL); err == nil {
+		t.Proxy = http.ProxyURL(u)
+	}
+	c := &http.Client{
+		Timeout:   time.Duration(timeoutSec) * time.Second,
+		Transport: t,
+		// 跟 tls-client 一致：不自动跟随重定向（302 是诊断信号）
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	stdlibClientCache.Store(key, c)
+	return c
+}
+
+// getStdlibClient returns an http.Client routed through proxyURL.
+// proxyURL must not be empty (caller checks).
+func getStdlibClient(proxyURL string) *http.Client {
+	return getStdlibClientTimeout(proxyURL, 0)
+}
+
+// loadCookie reads the cookie file (Netscape one-line format or JSON).
+// loadCookie 返回 (cookie 串, SAPISID, authuser)。只有旁路探测在用 —— 正式
+// 请求那条路在 streamGenerate 里自己挑号，因为它还要挨个换号和绑定出口。
+//
+// cookie 只有 cookie 池一个来源：挑一个 enabled 账号（最久未用优先，自动轮转
+// 分散单 IP 上限）。池空 = 匿名。原来那条「池空回落单 cookie」的路径已经取消，
+// 它的值在启动时被 seedCookiesFromConfig 并进池子了。
+//
+// authuser 是挑中那个号的账号槽位（/u/N/），旁路探测要按它拼 URL / 取 XSRF。
+func loadCookie() (cookie, sapisid string, authuser int) {
+	if a, ok := pickCookieAccount(); ok {
+		return a.Cookie, extractSAPISID(a.Cookie), a.AuthUser
+	}
+	return "", "", 0
+}
+
+func makeSAPISIDHash(sapisid string) string {
+	ts := time.Now().Unix()
+	h := sha1.Sum([]byte(fmt.Sprintf("%d %s https://gemini.google.com", ts, sapisid)))
+	return fmt.Sprintf("SAPISIDHASH %d_%s", ts, hex.EncodeToString(h[:]))
+}
+
+// ChromeUA 是给 stdlib 走代理时用的 Chrome 146 真实 UA 模板。
+const ChromeUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
+
+// applyChromeHeaders 给 stdlib 请求填上模拟 Chrome 146 的应用层 header。
+// utls 那层做 TLS/HTTP2 指纹我们做不到（走代理），但 header 一定要齐。
+func applyChromeHeaders(req *http.Request) {
+	req.Header.Set("User-Agent", ChromeUA)
+	req.Header.Set("Sec-CH-UA", `"Chromium";v="146", "Google Chrome";v="146", "Not?A_Brand";v="24"`)
+	req.Header.Set("Sec-CH-UA-Mobile", "?0")
+	req.Header.Set("Sec-CH-UA-Platform", `"Windows"`)
+	req.Header.Set("Sec-Fetch-Dest", "empty")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+}

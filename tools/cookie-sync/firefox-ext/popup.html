@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<title>Gemini — Đồng bộ phiên (Firefox)</title>
+<style>
+  :root { --bg:#0f1115; --card:#171a21; --fg:#e8eaed; --muted:#9aa0a6; --ok:#34a853; --bad:#ea4335; --warn:#fbbc04; --line:#2a2f3a; }
+  * { box-sizing:border-box; }
+  body { width:400px; margin:0; padding:14px; background:var(--bg); color:var(--fg);
+         font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif; }
+  h1 { font-size:14px; margin:0 0 10px; display:flex; align-items:center; gap:6px; }
+  .dot { width:8px; height:8px; border-radius:50%; background:var(--muted); }
+  .dot.ok { background:var(--ok); } .dot.bad { background:var(--bad); } .dot.warn { background:var(--warn); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:10px; margin-bottom:10px; }
+  .row { display:flex; justify-content:space-between; gap:8px; margin:4px 0; }
+  .row .k { color:var(--muted); flex:0 0 auto; }
+  .row .v { text-align:right; word-break:break-all; }
+  label.f { display:block; margin:8px 0 2px; color:var(--muted); }
+  input[type=text], input[type=password], input[type=number] { width:100%; background:#0b0d11; border:1px solid var(--line);
+       color:var(--fg); border-radius:7px; padding:6px 8px; font:inherit; }
+  .chk { display:flex; align-items:center; gap:6px; margin:6px 0; }
+  .btns { display:flex; gap:8px; margin-top:10px; }
+  button { flex:1; background:#2b6cb0; border:0; color:#fff; border-radius:8px; padding:7px 8px;
+       font:inherit; cursor:pointer; }
+  button.sec { background:#2a2f3a; }
+  button:disabled { opacity:.5; cursor:default; }
+  .hint { color:var(--muted); font-size:11px; margin-top:8px; }
+  .mono { font-family:ui-monospace,Consolas,monospace; font-size:11px; }
+</style>
+</head>
+<body>
+  <h1><span id="dot" class="dot"></span> Gemini — Đồng bộ phiên (Firefox)</h1>
+
+  <div class="card">
+    <div class="row"><span class="k">Duy trì phiên</span><span class="v" id="maintenanceOwner">VPS tự duy trì</span></div>
+    <div class="row"><span class="k">Chạy ở tab ẩn danh</span><span class="v" id="incognitoState">—</span></div>
+    <div class="row"><span class="k">Đăng nhập</span><span class="v" id="login">—</span></div>
+    <div class="row"><span class="k">Số cookie</span><span class="v" id="ckcount">—</span></div>
+    <div class="row"><span class="k">Giữ phiên lần cuối</span><span class="v" id="lastka">—</span></div>
+    <div class="row"><span class="k">Đồng bộ lần cuối</span><span class="v" id="lastsync">—</span></div>
+    <div class="row"><span class="k">Kết quả đồng bộ</span><span class="v mono" id="syncdetail">—</span></div>
+  </div>
+
+  <div class="card">
+    <div class="row"><span class="k">Tài khoản đã liên kết</span><span class="v" id="bindingCount">0</span></div>
+    <label class="f" for="bindingSelect">Chọn tài khoản để kiểm tra hoặc đồng bộ</label>
+    <select id="bindingSelect" style="width:100%;background:var(--bg);color:var(--fg);border:1px solid var(--line);padding:8px;border-radius:7px"></select>
+    <div id="bindingRows" style="max-height:180px;overflow:auto;margin-top:8px"></div>
+    <div class="btns"><button id="btnBindOpen" class="sec">Liên kết các tab Gemini đang mở</button></div>
+    <div class="btns"><button id="btnSyncAll">Đồng bộ các tài khoản</button></div>
+    <div id="batchDetail" class="hint"></div>
+    <div class="hint">Bản này mặc định giao phiên cho VPS. Sau khi đồng bộ thành công, đóng tab Gemini vừa đăng nhập, không bấm Đăng xuất. VPS sẽ thử gia hạn; cookie Chrome có thể bị ràng buộc thiết bị.</div>
+  </div>
+
+  <div class="card">
+    <div class="row"><span class="k">Tab liên kết</span><span class="v" id="boundState">Chưa liên kết</span></div>
+    <div class="row"><span class="k">Tài khoản liên kết</span><span class="v mono" id="boundEmail">—</span></div>
+    <div class="row"><span class="k">Chỉ số tài khoản</span><span class="v mono" id="boundAuth">—</span></div>
+    <div class="row"><span class="k">Kho cookie</span><span class="v mono" id="boundStore">—</span></div>
+    <div class="row"><span class="k">Địa chỉ tab</span><span class="v mono" id="boundUrl">—</span></div>
+    <div class="row"><span class="k">Email trên tab</span><span class="v mono" id="pageEmail">—</span></div>
+    <div class="row"><span class="k">Kiểm tra tab</span><span class="v mono" id="pageDetail">—</span></div>
+    <div class="btns">
+      <button id="btnBind">Liên kết tab</button>
+      <button id="btnReadPage" class="sec">Kiểm tra</button>
+      <button id="btnUnbind" class="sec">Hủy liên kết</button>
+    </div>
+    <div class="btns">
+      <button id="btnStatusSync" class="sec">Gửi trạng thái</button>
+    </div>
+    <div class="hint">Mở tab Gemini của tài khoản cần thêm, rồi bấm “Liên kết tab”. Tiện ích xác nhận email trên tab; không quét tài khoản khác hoặc tự mở tab mới.</div>
+    <div class="row"><span class="k">Mã nhận diện cookie</span><span class="v mono" id="cookieFingerprint">—</span></div>
+    <div class="mono" id="cookieSummary" style="white-space:pre-wrap;max-height:96px;overflow:auto;color:var(--muted)">—</div>
+  </div>
+
+  <div class="card">
+    <label class="f">Tên hồ sơ</label>
+    <input type="text" id="profile" placeholder="firefox">
+    <label class="f">Chế độ gửi</label>
+    <select id="pushMode" style="width:100%;background:#0b0d11;border:1px solid var(--line);color:inherit;border-radius:6px;padding:6px">
+      <option value="service">Máy chủ từ xa (khuyên dùng)</option>
+      <option value="controller">Bộ điều khiển Chromium nội bộ</option>
+    </select>
+    <label class="f">Địa chỉ máy chủ</label>
+    <input type="text" id="controller" placeholder="http://localhost:8083">
+    <label class="f">API key (lưu riêng trên trình duyệt)</label>
+    <input type="password" id="token" autocomplete="off" placeholder="sk-gemini-...">
+
+    <div class="chk"><input type="checkbox" id="enabled"><label for="enabled">Bật tiện ích (giữ phiên và đồng bộ)</label></div>
+    <div class="chk"><input type="checkbox" id="autoKeepalive"><label for="autoKeepalive">Tự động giữ phiên</label></div>
+    <label class="f">Giữ phiên mỗi (phút)</label>
+    <input type="number" id="keepalivePeriodMin" min="1" step="1">
+    <label class="f">Đồng bộ mỗi (phút)</label>
+    <input type="number" id="autoSyncMin" min="1" step="1">
+    <label class="f">Chờ giữa các lần tải lại (giây)</label>
+    <input type="number" id="refreshCooldownSec" min="10" step="5">
+  </div>
+
+  <div class="btns">
+    <button id="btnSave" class="sec">Lưu</button>
+    <button id="btnKa" class="sec">Giữ phiên</button>
+    <button id="btnSync">Thêm vào pool</button>
+  </div>
+  <div class="hint">Cookie chỉ được gửi đến địa chỉ máy chủ đã cấu hình (localhost hoặc VPS của bạn). Liên kết đúng tài khoản rồi bấm Thêm vào pool. Chế độ máy chủ tự duy trì không tự tải lại tab hoặc đồng bộ nền; nếu gia hạn thất bại, dùng phiên Firefox mới để đồng bộ lại.</div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
